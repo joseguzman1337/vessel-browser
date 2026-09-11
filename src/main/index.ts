@@ -1,4 +1,4 @@
-import { app, dialog, globalShortcut, session } from "electron";
+import { app, dialog, globalShortcut, session, BaseWindow, BrowserWindow } from "electron";
 import fs from "node:fs";
 import path from "path";
 import { createMainWindow, layoutViews, type WindowState } from "./window";
@@ -31,11 +31,7 @@ import {
   initializeRuntimeHealth,
   setStartupIssues,
 } from "./health/runtime-health";
-import {
-  registerHighlightShortcut,
-  setupAppMenu,
-  loadRenderers,
-} from "./startup";
+import { registerHighlightShortcut, setupAppMenu, loadRenderers } from "./startup";
 import { createSplashWindow, closeSplash } from "./splash";
 import { getHighlightCount } from "./highlights/inject";
 import type { RuntimeHealthIssue, VesselSettings } from "../shared/types";
@@ -50,10 +46,26 @@ import * as pageSnapshots from "./content/page-snapshots";
 let runtime: AgentRuntime | null = null;
 let windowStateForShutdown: WindowState | null = null;
 
+// Vessel is always an MCP-first headless runtime.  Constructor defaults alone
+// are insufficient: several workflows explicitly call show(), and Electron's
+// BaseWindow is separate from BrowserWindow.  Disable every native surface at
+// the shared prototypes and make dialogs fail closed before app readiness.
+app.disableHardwareAcceleration();
+if (process.platform === "darwin" && app.dock) {
+  app.dock.hide();
+}
+BrowserWindow.prototype.show = () => undefined;
+BaseWindow.prototype.show = () => undefined;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const headlessDialog = dialog as any;
+headlessDialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+headlessDialog.showMessageBoxSync = () => 1;
+headlessDialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+headlessDialog.showSaveDialog = async () => ({ canceled: true, filePath: undefined });
+
 function configureUserAgent(): void {
   const originalUA = session.defaultSession.getUserAgent();
-  const maskedUA =
-    originalUA.replace(/ Electron\/[^\s]+/, "") + " Vessel/" + app.getVersion();
+  const maskedUA = originalUA.replace(/ Electron\/[^\s]+/, "") + " Vessel/" + app.getVersion();
   session.defaultSession.setUserAgent(maskedUA);
 }
 
@@ -72,8 +84,7 @@ function checkWritableUserData(userDataPath: string): RuntimeHealthIssue[] {
       code: "user-data-not-writable",
       severity: "error",
       title: "Vessel cannot write to its data directory",
-      detail:
-        error instanceof Error ? error.message : "Unknown filesystem error.",
+      detail: error instanceof Error ? error.message : "Unknown filesystem error.",
       action: `Check permissions for ${userDataPath}.`,
     });
   }
@@ -84,15 +95,9 @@ function collectStartupIssues(
   settings: VesselSettings,
   userDataPath: string,
 ): RuntimeHealthIssue[] {
-  const issues = [
-    ...getSettingsLoadIssues(),
-    ...checkWritableUserData(userDataPath),
-  ];
+  const issues = [...getSettingsLoadIssues(), ...checkWritableUserData(userDataPath)];
 
-  if (
-    settings.obsidianVaultPath.trim() &&
-    !fs.existsSync(settings.obsidianVaultPath)
-  ) {
+  if (settings.obsidianVaultPath.trim() && !fs.existsSync(settings.obsidianVaultPath)) {
     issues.push({
       code: "obsidian-vault-missing",
       severity: "warning",
@@ -114,8 +119,7 @@ async function maybeShowStartupHealthDialog(
   windowState: ReturnType<typeof createMainWindow>,
 ): Promise<void> {
   const health = getRuntimeHealth();
-  const hasIssues =
-    health.startupIssues.length > 0 || health.mcp.status === "error";
+  const hasIssues = health.startupIssues.length > 0 || health.mcp.status === "error";
   if (!hasIssues) return;
 
   const lines = health.startupIssues.map(formatIssue);
@@ -307,12 +311,7 @@ async function bootstrap(): Promise<void> {
     "did-fail-load",
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame) return;
-      logger.error(
-        "Chrome renderer failed to load:",
-        errorCode,
-        errorDescription,
-        validatedURL,
-      );
+      logger.error("Chrome renderer failed to load:", errorCode, errorDescription, validatedURL);
       clearTimeout(splashTimeout);
       revealMainWindow();
     },
@@ -338,35 +337,35 @@ process.on("uncaughtException", (error: Error) => {
 
 /** Handle rejected Promises that bubble up without a .catch() */
 process.on("unhandledRejection", (reason: unknown) => {
-  logger.error(
-    "Unhandled rejection:",
-    reason instanceof Error ? reason.message : reason,
-  );
+  logger.error("Unhandled rejection:", reason instanceof Error ? reason.message : reason);
 });
 
-app.whenReady().then(bootstrap).catch((error) => {
-  logger.error("Failed to bootstrap application:", error);
-  app.quit();
-});
+app
+  .whenReady()
+  .then(bootstrap)
+  .catch((error) => {
+    logger.error("Failed to bootstrap application:", error);
+    app.quit();
+  });
 
-  app.on("window-all-closed", () => {
-    globalShortcut.unregisterAll();
-    stopTelemetry();
-    stopBackgroundRevalidation();
-    // Dispose runtime and tab manager before persisting to free listeners and memory
-    runtime?.dispose();
-    windowStateForShutdown?.tabManager.dispose();
-    void Promise.all([
-      runtime?.flushPersist() ?? Promise.resolve(),
-      bookmarkManager.flushPersist(),
-      historyManager.flushPersist(),
-      highlightsManager.flushPersist(),
-      autofillManager.flushPersist(),
-      pageSnapshots.flushPersist(),
-      flushSettingsPersist(),
-    ]).finally(() => {
-      void stopMcpServer().finally(() => {
-        app.quit();
-      });
+app.on("window-all-closed", () => {
+  globalShortcut.unregisterAll();
+  stopTelemetry();
+  stopBackgroundRevalidation();
+  // Dispose runtime and tab manager before persisting to free listeners and memory
+  runtime?.dispose();
+  windowStateForShutdown?.tabManager.dispose();
+  void Promise.all([
+    runtime?.flushPersist() ?? Promise.resolve(),
+    bookmarkManager.flushPersist(),
+    historyManager.flushPersist(),
+    highlightsManager.flushPersist(),
+    autofillManager.flushPersist(),
+    pageSnapshots.flushPersist(),
+    flushSettingsPersist(),
+  ]).finally(() => {
+    void stopMcpServer().finally(() => {
+      app.quit();
     });
   });
+});
