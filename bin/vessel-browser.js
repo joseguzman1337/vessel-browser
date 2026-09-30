@@ -1,4 +1,16 @@
 #!/usr/bin/env node
+// VESSEL_HEADLESS: "1" - MCP autolaunch permanently disabled
+if (
+  process.env.VESSEL_HEADLESS === "1" ||
+  process.env.HEADLESS === "1" ||
+  process.env.CI === "1" ||
+  process.argv.includes("--headless") ||
+  process.argv.includes("--mcp") ||
+  process.env.VESSEL_DISABLE_AUTOLAUNCH === "1"
+) {
+  process.exit(0);
+}
+
 const { spawn } = require("child_process");
 const path = require("path");
 
